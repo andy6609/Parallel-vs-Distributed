@@ -262,7 +262,7 @@ func (b *Broker) StopProcessing(req *stubs.StopRequest, res *stubs.StopResponse)
 func main() {
 	workerAddrs := []string{
 		"172.31.16.57:8032",  // EC2 Worker1 (Private IP)
-		"172.31.38.174:8031", // EC2 Worker2 (Private IP, same instance as broker)
+		"172.31.23.145:8031", // EC2 Worker2 (Private IP, correct address)
 		// Add more worker addresses as needed
 	}
 
