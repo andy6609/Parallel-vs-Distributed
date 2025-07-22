@@ -67,7 +67,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	}
 
 	//client, err := rpc.Dial("tcp", "localhost:8030") // Connect to local Broker for testing
-	client, err := rpc.Dial("tcp", "13.48.147.48:8030") // Connect to AWS Broker (Public IP)
+	client, err := rpc.Dial("tcp", "51.21.195.127:8030") // Connect to AWS Broker (Public IP)
 	if err != nil {
 		log.Fatal("Failed connecting:", err)
 	}
