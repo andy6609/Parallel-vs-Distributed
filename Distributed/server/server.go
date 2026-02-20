@@ -11,11 +11,18 @@ import (
 	"uk.ac.bris.cs/gameoflife/stubs"
 )
 
+// RuleSet constants (must match Params definitions)
+const (
+	Conway      = 0 // B3/S23
+	HighLife    = 1 // B36/S23
+	DayAndNight = 2 // B3678/S34678
+)
+
 type GolWorker struct {
 	mu sync.Mutex
 }
 
-// Ghost rows를 사용하는 새로운 이웃 계산 함수
+// calculateNeighboursWithGhost counts live neighbours using ghost rows for boundaries.
 func calculateNeighboursWithGhost(world [][]uint8, x, y, width int) int {
 	count := 0
 	for deltaY := -1; deltaY <= 1; deltaY++ {
@@ -26,14 +33,12 @@ func calculateNeighboursWithGhost(world [][]uint8, x, y, width int) int {
 			nx := x + deltaX
 			ny := y + deltaY
 
-			// x 방향 경계 처리 (world wrapping)
 			if nx < 0 {
 				nx = width - 1
 			} else if nx >= width {
 				nx = 0
 			}
 
-			// ghost rows를 사용하므로 y 방향은 직접 접근
 			if world[ny][nx] == 255 {
 				count++
 			}
@@ -42,44 +47,68 @@ func calculateNeighboursWithGhost(world [][]uint8, x, y, width int) int {
 	return count
 }
 
+// applyRules returns the next cell state based on the chosen rule set.
+func applyRules(alive bool, neighbours, ruleSet int) uint8 {
+	switch ruleSet {
+	case HighLife:
+		if alive {
+			if neighbours == 2 || neighbours == 3 {
+				return 255
+			}
+			return 0
+		}
+		if neighbours == 3 || neighbours == 6 {
+			return 255
+		}
+		return 0
+	case DayAndNight:
+		if alive {
+			if neighbours == 3 || neighbours == 4 || neighbours == 6 || neighbours == 7 || neighbours == 8 {
+				return 255
+			}
+			return 0
+		}
+		if neighbours == 3 || neighbours == 6 || neighbours == 7 || neighbours == 8 {
+			return 255
+		}
+		return 0
+	default: // Conway
+		if alive {
+			if neighbours == 2 || neighbours == 3 {
+				return 255
+			}
+			return 0
+		}
+		if neighbours == 3 {
+			return 255
+		}
+		return 0
+	}
+}
+
 func (g *GolWorker) CalculateNextState(req *stubs.WorkerRequest, res *stubs.WorkerResponse) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	log.Printf("Worker processing slice: Y=%d to Y=%d, size=%dx%d",
-		req.StartY, req.EndY, req.ImageWidth, len(req.WorldSlice))
+	log.Printf("Worker processing slice: Y=%d to Y=%d, size=%dx%d, ruleSet=%d",
+		req.StartY, req.EndY, req.ImageWidth, len(req.WorldSlice), req.RuleSet)
 
 	worldSlice := req.WorldSlice
 	height := len(worldSlice)
 	width := req.ImageWidth
 
-	// Ghost rows를 제외한 실제 처리할 행 수
 	actualHeight := height - 2
 	newWorldSlice := make([][]uint8, actualHeight)
 
 	aliveCellsCount := 0
 
-	// ghost rows를 제외하고 중간 부분만 처리 (인덱스 1부터 height-2까지)
 	for y := 1; y < height-1; y++ {
 		newRow := make([]uint8, width)
 		for x := 0; x < width; x++ {
 			neighbours := calculateNeighboursWithGhost(worldSlice, x, y, width)
-			if worldSlice[y][x] == 255 {
-				// 살아있는 셀
-				if neighbours == 2 || neighbours == 3 {
-					newRow[x] = 255
-					aliveCellsCount++
-				} else {
-					newRow[x] = 0
-				}
-			} else {
-				// 죽은 셀
-				if neighbours == 3 {
-					newRow[x] = 255
-					aliveCellsCount++
-				} else {
-					newRow[x] = 0
-				}
+			newRow[x] = applyRules(worldSlice[y][x] == 255, neighbours, req.RuleSet)
+			if newRow[x] == 255 {
+				aliveCellsCount++
 			}
 		}
 		newWorldSlice[y-1] = newRow

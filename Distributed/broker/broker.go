@@ -11,6 +11,11 @@ import (
 	"uk.ac.bris.cs/gameoflife/stubs"
 )
 
+const (
+	maxReconnectAttempts = 3
+	reconnectDelay       = 100 * time.Millisecond
+)
+
 type Broker struct {
 	mu          sync.Mutex
 	workers     []*rpc.Client
@@ -24,6 +29,8 @@ type Broker struct {
 	processing  bool
 	paused      bool
 	shutdown    bool
+	ruleSet     int            // 0=Conway, 1=HighLife, 2=DayAndNight
+	deadWorkers map[int]bool   // tracks permanently failed workers
 }
 
 func (b *Broker) connectToWorkers(workerAddrs []string) error {
@@ -42,6 +49,31 @@ func (b *Broker) connectToWorkers(workerAddrs []string) error {
 	}
 
 	return nil
+}
+
+// reconnectWorker attempts to re-dial a failed worker up to maxReconnectAttempts times.
+// Returns true if reconnection succeeded; marks the worker dead on permanent failure.
+func (b *Broker) reconnectWorker(index int) bool {
+	addr := b.workerAddrs[index]
+	for attempt := 1; attempt <= maxReconnectAttempts; attempt++ {
+		log.Printf("Reconnecting to worker %d at %s (attempt %d/%d)", index, addr, attempt, maxReconnectAttempts)
+		client, err := rpc.Dial("tcp", addr)
+		if err == nil {
+			b.mu.Lock()
+			b.workers[index] = client
+			delete(b.deadWorkers, index)
+			b.mu.Unlock()
+			log.Printf("Reconnected to worker %d successfully", index)
+			return true
+		}
+		log.Printf("Reconnect attempt %d failed: %v", attempt, err)
+		time.Sleep(reconnectDelay)
+	}
+	b.mu.Lock()
+	b.deadWorkers[index] = true
+	b.mu.Unlock()
+	log.Printf("Worker %d permanently marked as dead", index)
+	return false
 }
 
 func (b *Broker) Process(req *stubs.EngineRequest, res *stubs.EngineResponse) error {
@@ -63,6 +95,8 @@ func (b *Broker) Process(req *stubs.EngineRequest, res *stubs.EngineResponse) er
 	b.processing = true
 	b.paused = false
 	b.shutdown = false
+	b.ruleSet = req.RuleSet
+	b.deadWorkers = make(map[int]bool)
 	b.mu.Unlock()
 
 	log.Printf("Starting simulation: %dx%d for %d turns", b.width, b.height, b.totalTurns)
@@ -111,68 +145,115 @@ func (b *Broker) runSimulation() {
 	b.mu.Unlock()
 }
 
+// buildWorkerSlice creates a ghost-row-padded slice for a worker covering [startY, endY).
+func (b *Broker) buildWorkerSlice(currentWorld [][]uint8, startY, endY int) [][]uint8 {
+	workerWorld := make([][]uint8, endY-startY+2) // +2 for ghost rows
+	for y := startY - 1; y <= endY; y++ {
+		row := make([]uint8, b.width)
+		copy(row, currentWorld[(y+b.height)%b.height])
+		workerWorld[y-startY+1] = row
+	}
+	return workerWorld
+}
+
+// activePartitions divides [0, height) among alive workers, skipping dead ones.
+// Returns a slice of (startY, endY, workerIndex) tuples.
+func (b *Broker) activePartitions() [][3]int {
+	var alive []int
+	for i := range b.workers {
+		if !b.deadWorkers[i] {
+			alive = append(alive, i)
+		}
+	}
+	if len(alive) == 0 {
+		return nil
+	}
+	rows := b.height / len(alive)
+	rem := b.height % len(alive)
+	var parts [][3]int
+	cursor := 0
+	for pos, idx := range alive {
+		start := cursor
+		end := start + rows
+		if pos == len(alive)-1 {
+			end += rem
+		}
+		parts = append(parts, [3]int{start, end, idx})
+		cursor = end
+	}
+	return parts
+}
+
 func (b *Broker) distributeWork() error {
 	b.mu.Lock()
-	// Divide world into slices
-	numWorkers := len(b.workers)
-	rowsPerWorker := b.height / numWorkers
-	remainder := b.height % numWorkers
-
-	// 현재 world 상태를 복사하여 안전하게 사용
 	currentWorld := make([][]uint8, b.height)
 	for i := 0; i < b.height; i++ {
 		currentWorld[i] = make([]uint8, b.width)
 		copy(currentWorld[i], b.world[i])
 	}
+	ruleSet := b.ruleSet
+	partitions := b.activePartitions()
 	b.mu.Unlock()
 
-	var wg sync.WaitGroup
-	wg.Add(numWorkers)
+	if len(partitions) == 0 {
+		log.Println("No active workers available")
+		return fmt.Errorf("no active workers")
+	}
+
 	newWorld := make([][]uint8, b.height)
 	for i := 0; i < b.height; i++ {
 		newWorld[i] = make([]uint8, b.width)
 	}
 
-	// 결과 수집을 위한 뮤텍스
+	var wg sync.WaitGroup
 	var resultMu sync.Mutex
 
-	for i := 0; i < numWorkers; i++ {
-		startY := i * rowsPerWorker
-		endY := startY + rowsPerWorker
-		if i == numWorkers-1 {
-			endY += remainder
-		}
-		workerWorld := make([][]uint8, endY-startY+2) // Include ghost rows
-		for y := startY - 1; y <= endY; y++ {
-			row := make([]uint8, b.width)
-			copy(row, currentWorld[(y+b.height)%b.height])
-			workerWorld[y-startY+1] = row
-		}
+	for _, part := range partitions {
+		startY, endY, idx := part[0], part[1], part[2]
+		wg.Add(1)
 
-		request := stubs.WorkerRequest{
-			StartY:      startY,
-			EndY:        endY,
-			WorldSlice:  workerWorld,
-			ImageWidth:  b.width,
-			ImageHeight: b.height,
-		}
-
-		worker := b.workers[i]
-		go func(worker *rpc.Client, request stubs.WorkerRequest, index int) {
+		go func(workerIdx, startY, endY int) {
 			defer wg.Done()
+
+			request := stubs.WorkerRequest{
+				StartY:      startY,
+				EndY:        endY,
+				WorldSlice:  b.buildWorkerSlice(currentWorld, startY, endY),
+				ImageWidth:  b.width,
+				ImageHeight: b.height,
+				RuleSet:     ruleSet,
+			}
+
+			b.mu.Lock()
+			worker := b.workers[workerIdx]
+			b.mu.Unlock()
+
 			response := new(stubs.WorkerResponse)
 			err := worker.Call(stubs.CalculateNextState, request, response)
+
+			// --- Fault Tolerance: reconnect and retry once ---
 			if err != nil {
-				log.Printf("Error calling worker %d: %v", index, err)
+				log.Printf("Worker %d failed: %v — attempting reconnect", workerIdx, err)
+				if b.reconnectWorker(workerIdx) {
+					b.mu.Lock()
+					worker = b.workers[workerIdx]
+					b.mu.Unlock()
+					response = new(stubs.WorkerResponse)
+					err = worker.Call(stubs.CalculateNextState, request, response)
+				}
+			}
+
+			if err != nil {
+				log.Printf("Worker %d permanently failed, skipping its rows %d-%d", workerIdx, startY, endY)
 				return
 			}
-			// Copy the results back into newWorld with synchronization
+
 			resultMu.Lock()
-			for y := request.StartY; y < request.EndY; y++ {
-				copy(newWorld[y], response.WorldSlice[y-request.StartY])
+			for y := startY; y < endY; y++ {
+				copy(newWorld[y], response.WorldSlice[y-startY])
 			}
 			resultMu.Unlock()
-		}(worker, request, i)
+		}(idx, startY, endY)
 	}
 
 	wg.Wait()

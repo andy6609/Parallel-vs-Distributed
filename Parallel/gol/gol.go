@@ -3,9 +3,10 @@ package gol
 // Params provides the details of how to run the Game of Life and which image to load.
 type Params struct {
 	Turns       int
-	Threads     int
+	Threads     int  // 0 = explicit serial path (no Worker Pool)
 	ImageWidth  int
 	ImageHeight int
+	RuleSet     int  // 0=Conway(B3/S23), 1=HighLife(B36/S23), 2=DayAndNight(B3678/S34678)
 }
 
 // Run starts the processing of Game of Life. It should initialise channels and goroutines.

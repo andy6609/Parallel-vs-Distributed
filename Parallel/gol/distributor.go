@@ -8,6 +8,50 @@ import (
 	"uk.ac.bris.cs/gameoflife/util"
 )
 
+// RuleSet constants for Game of Life variants
+const (
+	Conway     = 0 // B3/S23   – standard Conway's Game of Life
+	HighLife   = 1 // B36/S23  – HighLife variant
+	DayAndNight = 2 // B3678/S34678 – Day & Night variant
+)
+
+// applyRules returns the next state (0 or 255) given the current state,
+// neighbour count, and rule set.
+func applyRules(alive bool, neighbours int, ruleSet int) byte {
+	switch ruleSet {
+	case HighLife:
+		if alive {
+			return map[int]byte{2: 255, 3: 255}[neighbours]
+		}
+		if neighbours == 3 || neighbours == 6 {
+			return 255
+		}
+		return 0
+	case DayAndNight:
+		if alive {
+			if neighbours == 3 || neighbours == 4 || neighbours == 6 || neighbours == 7 || neighbours == 8 {
+				return 255
+			}
+			return 0
+		}
+		if neighbours == 3 || neighbours == 6 || neighbours == 7 || neighbours == 8 {
+			return 255
+		}
+		return 0
+	default: // Conway
+		if alive {
+			if neighbours == 2 || neighbours == 3 {
+				return 255
+			}
+			return 0
+		}
+		if neighbours == 3 {
+			return 255
+		}
+		return 0
+	}
+}
+
 type DistributorChannels struct {
 	events     chan<- Event
 	ioCommand  chan<- ioCommand
@@ -36,6 +80,7 @@ type workerTask struct {
 	world        [][]byte
 	params       Params
 	turn         int
+	ruleSet      int
 }
 
 // Initialize Worker Pool
@@ -84,20 +129,7 @@ func (wp *WorkerPool) processTask(task workerTask) workerResult {
 			localY := y - task.startY
 
 			oldState := task.world[y][x]
-			var newState byte
-			if oldState == 255 {
-				if neighbors < 2 || neighbors > 3 {
-					newState = 0
-				} else {
-					newState = 255
-				}
-			} else {
-				if neighbors == 3 {
-					newState = 255
-				} else {
-					newState = 0
-				}
-			}
+			newState := applyRules(oldState == 255, neighbors, task.ruleSet)
 			newWorld[localY][x] = newState
 
 			// if state changed, add to flipped
@@ -158,6 +190,34 @@ type workerResult struct {
 	flipped []util.Cell
 }
 
+// CalculateSerial computes one turn sequentially without a Worker Pool.
+// Used when p.Threads == 0 as an explicit serial baseline.
+func CalculateSerial(p Params, world [][]byte, c DistributorChannels, turn int) [][]byte {
+	height := p.ImageHeight
+	newWorld := make([][]byte, height)
+	for i := range newWorld {
+		newWorld[i] = make([]byte, p.ImageWidth)
+	}
+
+	var flipped []util.Cell
+	for y := 0; y < height; y++ {
+		for x := 0; x < p.ImageWidth; x++ {
+			neighbours := countAliveNeighbors(x, y, world, p.ImageWidth, height)
+			oldState := world[y][x]
+			newState := applyRules(oldState == 255, neighbours, p.RuleSet)
+			newWorld[y][x] = newState
+			if oldState != newState {
+				flipped = append(flipped, util.Cell{X: x, Y: y})
+			}
+		}
+	}
+
+	if len(flipped) > 0 {
+		c.events <- CellsFlipped{CompletedTurns: turn, Cells: flipped}
+	}
+	return newWorld
+}
+
 func CalculateNextState(p Params, threads int, world [][]byte, c DistributorChannels, turn int) [][]byte {
 	height := p.ImageHeight
 	workerHeight := height / threads
@@ -176,11 +236,12 @@ func CalculateNextState(p Params, threads int, world [][]byte, c DistributorChan
 		}
 
 		task := workerTask{
-			startY: startY,
-			endY:   endY,
-			world:  world,
-			params: p,
-			turn:   turn,
+			startY:  startY,
+			endY:    endY,
+			world:   world,
+			params:  p,
+			turn:    turn,
+			ruleSet: p.RuleSet,
 		}
 		wp.taskChan <- task
 	}
@@ -215,20 +276,21 @@ func CalculateNextState(p Params, threads int, world [][]byte, c DistributorChan
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c DistributorChannels, keyPresses <-chan rune) {
 
-	// Initialize global Worker Pool
-	workerPoolMutex.Lock()
-	globalWorkerPool = NewWorkerPool(p.Threads)
-	workerPoolMutex.Unlock()
-
-	// Clean up Worker Pool on program exit
-	defer func() {
+	// Initialize global Worker Pool (skip if serial mode)
+	if p.Threads > 0 {
 		workerPoolMutex.Lock()
-		if globalWorkerPool != nil {
-			globalWorkerPool.Stop()
-			globalWorkerPool = nil
-		}
+		globalWorkerPool = NewWorkerPool(p.Threads)
 		workerPoolMutex.Unlock()
-	}()
+
+		defer func() {
+			workerPoolMutex.Lock()
+			if globalWorkerPool != nil {
+				globalWorkerPool.Stop()
+				globalWorkerPool = nil
+			}
+			workerPoolMutex.Unlock()
+		}()
+	}
 
 	// TODO: Create a 2D slice to store the world.
 	world := make([][]byte, p.ImageHeight)
@@ -319,13 +381,12 @@ func distributor(p Params, c DistributorChannels, keyPresses <-chan rune) {
 			}
 			if !isPaused && turn < p.Turns {
 				// 1. Calculate next state and send CellsFlipped event
-				world = CalculateNextState(
-					p,
-					p.Threads,
-					world,
-					c,
-					turn,
-				)
+				if p.Threads == 0 {
+					// Explicit serial path (no Worker Pool overhead)
+					world = CalculateSerial(p, world, c, turn)
+				} else {
+					world = CalculateNextState(p, p.Threads, world, c, turn)
+				}
 
 				// 2. Handle turn completion
 				completedTurns++

@@ -16,6 +16,7 @@ type EngineRequest struct {
 	ImageWidth  int
 	ImageHeight int
 	Turns       int
+	RuleSet     int // 0=Conway, 1=HighLife, 2=DayAndNight
 }
 
 type EngineResponse struct {
@@ -62,6 +63,7 @@ type WorkerRequest struct {
 	WorldSlice  [][]uint8
 	ImageWidth  int
 	ImageHeight int
+	RuleSet     int // 0=Conway, 1=HighLife, 2=DayAndNight
 }
 
 type WorkerResponse struct {
