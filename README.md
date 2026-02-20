@@ -1,6 +1,6 @@
 # Concurrent and Distributed Implementations of Conway's Game of Life in Go
 
-Implemented, optimised (inc halo exchange, communication overhead, architecture considerations) and compared parallel and distributed versions for Conway's Game of Life.
+Implemented, optimised (worker pool design, communication overhead, architecture considerations) and compared concurrent and distributed versions for Conway's Game of Life.
 
 See all details in the report [here](report.pdf) or in the pages below:
 
