@@ -1,0 +1,7 @@
+grid,implementation,workers,time_ms
+128,Local-Distributed,2,286
+128,AWS-Distributed,2,439
+256,Local-Distributed,2,1090
+256,AWS-Distributed,2,1929
+512,Local-Distributed,2,4291
+512,AWS-Distributed,2,9901
